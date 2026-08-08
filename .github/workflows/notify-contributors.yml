@@ -1,0 +1,90 @@
+name: Notify Everyone With Access
+
+on:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect committer emails
+        id: emails
+        run: |
+          emails=$(git log --format='%ae' \
+            | grep -v 'noreply.github.com' \
+            | sort -u \
+            | paste -sd ',' -)
+          echo "list=$emails" >> "$GITHUB_OUTPUT"
+
+      - name: Create and auto-close notification issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const actor = context.actor;
+            const c = context.payload.head_commit;
+            const branch = context.ref.replace('refs/heads/', '');
+
+            const body = [
+              `**New commit** pushed to \`${owner}/${repo}\` by @${actor}`,
+              ``,
+              `**Branch:** \`${branch}\``,
+              `**Message:** ${c.message}`,
+              `**Commit:** ${c.url}`,
+            ].join('\n');
+
+            const issue = await github.rest.issues.create({
+              owner, repo,
+              title: `[notify] New commit by ${actor} on ${branch}`,
+              body,
+            });
+
+            await github.rest.issues.update({
+              owner, repo,
+              issue_number: issue.data.number,
+              state: 'closed',
+            });
+
+      - name: Check email credentials
+        id: creds
+        env:
+          MAIL_USER: ${{ secrets.MAIL_USERNAME }}
+        run: |
+          if [ -n "$MAIL_USER" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::MAIL_USERNAME secret not set — skipping email notification"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send email notifications
+        if: steps.creds.outputs.configured == 'true' && steps.emails.outputs.list != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          from: Repo Notifications <${{ secrets.MAIL_USERNAME }}>
+          to: ${{ steps.emails.outputs.list }}
+          subject: "New commit in ${{ github.repository }} by ${{ github.actor }}"
+          body: |
+            A new commit was pushed to ${{ github.repository }}.
+
+            Author:  ${{ github.actor }}
+            Branch:  ${{ github.ref_name }}
+            Message: ${{ github.event.head_commit.message }}
+
+            View it here:
+            ${{ github.event.head_commit.url }}
